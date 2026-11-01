@@ -1,0 +1,25 @@
+# Environment variables and sensitive credentials
+.env
+*.env
+
+# Local session data, browser profiles, cookies, screenshots, logs
+data/
+data/*
+
+# Python cache and virtual environment
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+env/
+venv/
+ENV/
+
+# Logs
+*.log
+
+# Editor and OS specific files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
