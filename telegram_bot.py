@@ -356,7 +356,7 @@ class SpectrumTelegramBot:
         data = query.data
         if data == "att_confirm":
             await safe_reply(query, "⏳ Processing attendance submission on Spectrum... Please wait.")
-            result = await asyncio.to_thread(self.att_mgr.confirm_and_submit)
+            result = await self.att_mgr.confirm_and_submit_async()
             if result.get("success"):
                 success_text = (
                     "🎉 *ATTENDANCE MARKED SUCCESSFULLY!*\n"
@@ -427,7 +427,7 @@ class SpectrumTelegramBot:
                 parse_mode=ParseMode.MARKDOWN
             )
 
-            result = await asyncio.to_thread(self.att_mgr.confirm_and_submit, password)
+            result = await self.att_mgr.confirm_and_submit_async(password)
             if result.get("success"):
                 success_text = (
                     "🎉 *ATTENDANCE MARKED SUCCESSFULLY!*\n"

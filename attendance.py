@@ -116,9 +116,42 @@ class AttendanceManager:
         self.save_pending(pending_record)
         return pending_record
 
+    async def confirm_and_submit_async(self, password: Optional[str] = None) -> Dict[str, Any]:
+        """
+        User confirmed! Execute attendance tick asynchronously using Playwright Async API.
+        Safe for FastAPI and Telegram bot event loops.
+        """
+        pending = self.get_pending()
+        if not pending:
+            return {
+                "success": False,
+                "message": "No pending attendance session found to submit."
+            }
+
+        submit_url = pending.get("submit_url")
+        if not submit_url:
+            return {
+                "success": False,
+                "message": "Invalid submission URL."
+            }
+
+        logger.info(f"Submitting attendance asynchronously for {pending.get('course_name')}...")
+        result = await self.client.submit_attendance_async(submit_url, password=password)
+
+        if result.get("success"):
+            pending["status"] = "completed"
+            pending["submitted_at"] = datetime.now().isoformat()
+            self.log_history(pending)
+            self.save_pending(None)  # clear pending
+        else:
+            pending["last_error"] = result.get("message")
+            self.save_pending(pending)
+
+        return result
+
     def confirm_and_submit(self, password: Optional[str] = None) -> Dict[str, Any]:
         """
-        User confirmed! Execute the attendance tick on Spectrum.
+        User confirmed! Synchronous entry point.
         """
         pending = self.get_pending()
         if not pending:

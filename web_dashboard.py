@@ -858,7 +858,7 @@ async def post_login(bg_tasks: BackgroundTasks):
 async def post_submit_attendance(req: Request):
     body = await req.json()
     pwd = body.get("password")
-    result = att_mgr.confirm_and_submit(password=pwd)
+    result = await att_mgr.confirm_and_submit_async(password=pwd)
     return result
 
 @app.post("/api/attendance/skip")

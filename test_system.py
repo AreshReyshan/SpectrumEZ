@@ -45,5 +45,20 @@ class TestSpectrumEzComponents(unittest.TestCase):
         self.assertIn("WIX2001", formatted)
         self.assertIn("confirm", formatted)
 
+    def test_async_attendance_in_event_loop(self):
+        """Verify that confirm_and_submit_async runs in asyncio without Playwright sync error."""
+        import asyncio
+        from attendance import AttendanceManager
+        from moodle_client import SpectrumClient
+
+        client = SpectrumClient()
+        mgr = AttendanceManager(client)
+
+        async def run_async_check():
+            res = await mgr.confirm_and_submit_async()
+            self.assertIn("success", res)
+
+        asyncio.run(run_async_check())
+
 if __name__ == "__main__":
     unittest.main()

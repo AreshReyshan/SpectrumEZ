@@ -1,3 +1,5 @@
+import asyncio
+import concurrent.futures
 import json
 import logging
 import re
@@ -6,6 +8,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Any
 from bs4 import BeautifulSoup
 import requests
+from playwright.async_api import async_playwright
 from playwright.sync_api import sync_playwright
 
 from config import (
@@ -383,11 +386,10 @@ class SpectrumClient:
             logger.error(f"Error parsing attendance table from {attendance_url}: {e}")
             return []
 
-    def submit_attendance_playwright(self, submit_url: str, password: Optional[str] = None) -> Dict[str, Any]:
+    async def submit_attendance_async(self, submit_url: str, password: Optional[str] = None) -> Dict[str, Any]:
         """
-        Automate the attendance submission using Playwright.
-        Selects 'Present' / 'Hadir', fills password if needed, submits form,
-        verifies confirmation, and captures a screenshot.
+        Automate attendance submission using Playwright Async API.
+        Safe to call inside asyncio event loops (FastAPI, python-telegram-bot).
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         screenshot_path = SCREENSHOTS_DIR / f"attendance_{timestamp}.png"
@@ -399,9 +401,8 @@ class SpectrumClient:
         }
 
         try:
-            with sync_playwright() as p:
-                # Launch headless browser using persistent profile or storage state
-                browser = p.chromium.launch(headless=True)
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
                 
                 # Setup context with stored cookies
                 cookies = []
@@ -413,74 +414,99 @@ class SpectrumClient:
                         "path": "/"
                     })
 
-                context = browser.new_context()
+                context = await browser.new_context()
                 if cookies:
-                    context.add_cookies(cookies)
+                    await context.add_cookies(cookies)
 
-                page = context.new_page()
+                page = await context.new_page()
                 logger.info(f"Navigating to attendance submit page: {submit_url}")
-                page.goto(submit_url, wait_until="domcontentloaded", timeout=25000)
+                await page.goto(submit_url, wait_until="domcontentloaded", timeout=25000)
 
                 # Check if redirected to login
                 if "login" in page.url or "microsoftonline" in page.url:
                     result["message"] = "Session expired! Could not submit attendance."
-                    browser.close()
+                    await browser.close()
                     return result
 
                 # Look for Present radio button
-                # Moodle typically has radio input with label 'Present' or 'Hadir'
-                present_radio = None
-                labels = page.query_selector_all("label")
-                for lbl in labels:
-                    txt = (lbl.text_content() or "").lower()
-                    if "present" in txt or "hadir" in txt:
-                        for_attr = lbl.get_attribute("for")
-                        if for_attr:
-                            present_radio = page.query_selector(f"#{for_attr}")
-                            if present_radio:
-                                break
+                present_clicked = False
 
-                # Fallback to standard input elements
-                if not present_radio:
-                    # Often status radio values: 1 is Present
-                    present_radio = page.query_selector("input[type='radio'][value='1']") or page.query_selector("input[type='radio']")
+                # 1. Try label matching text 'Present' or 'Hadir'
+                present_labels = page.locator("label:has-text('Present'), label:has-text('Hadir')")
+                if await present_labels.count() > 0:
+                    try:
+                        await present_labels.first.click()
+                        present_clicked = True
+                        logger.info("Clicked Present/Hadir label directly.")
+                    except Exception as le:
+                        logger.warning(f"Label click failed: {le}")
 
-                if present_radio:
-                    present_radio.click()
-                    logger.info("Clicked Present radio button.")
-                else:
+                # 2. Try radio button by value or label for-attribute
+                if not present_clicked:
+                    labels = await page.query_selector_all("label")
+                    for lbl in labels:
+                        txt = (await lbl.text_content() or "").lower()
+                        if "present" in txt or "hadir" in txt:
+                            for_attr = await lbl.get_attribute("for")
+                            if for_attr:
+                                radio = await page.query_selector(f"#{for_attr}")
+                                if radio:
+                                    await radio.click()
+                                    present_clicked = True
+                                    logger.info(f"Clicked radio associated with label #{for_attr}.")
+                                    break
+
+                # 3. Fallback to status radio values (1 is typically Present)
+                if not present_clicked:
+                    fallback_radio = (
+                        await page.query_selector("input[type='radio'][value='1']") or 
+                        await page.query_selector("input[type='radio']")
+                    )
+                    if fallback_radio:
+                        await fallback_radio.click()
+                        present_clicked = True
+                        logger.info("Clicked fallback radio button.")
+
+                if not present_clicked:
                     logger.warning("Could not find Present radio button.")
 
                 # If student password input is present
-                pwd_input = page.query_selector("input[type='password'], input[name='studentpassword']")
+                pwd_input = (
+                    await page.query_selector("input[type='password']") or
+                    await page.query_selector("input[name='studentpassword']") or
+                    await page.query_selector("input[name*='password']")
+                )
                 if pwd_input:
                     if password:
-                        pwd_input.fill(password)
+                        await pwd_input.fill(password)
                         logger.info(f"Filled session password: {password}")
                     else:
                         logger.warning("Attendance requires a password, but none was provided!")
 
                 # Click Submit button: 'Save changes' or 'Submit attendance'
                 submit_btn = (
-                    page.query_selector("input[name='submitbutton']") or
-                    page.query_selector("button[type='submit']") or
-                    page.query_selector("input[type='submit']")
+                    await page.query_selector("input[name='submitbutton']") or
+                    await page.query_selector("button[type='submit']") or
+                    await page.query_selector("input[type='submit']")
                 )
 
                 if submit_btn:
-                    submit_btn.click()
-                    page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    await submit_btn.click()
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    except Exception:
+                        pass
                     logger.info("Clicked submit attendance button.")
 
-                # Wait 2 seconds for confirmation to render
-                page.wait_for_timeout(2000)
+                # Small delay for submission to register
+                await page.wait_for_timeout(2000)
 
                 # Capture screenshot proof
-                page.screenshot(path=str(screenshot_path))
+                await page.screenshot(path=str(screenshot_path))
                 result["screenshot"] = str(screenshot_path)
 
                 # Verify if 'Present' or 'Hadir' is now reflected on the page
-                content = page.content().lower()
+                content = (await page.content()).lower()
                 if "present" in content or "hadir" in content or "self-recorded" in content or "submitted" in content:
                     result["success"] = True
                     result["message"] = "Attendance successfully submitted and recorded as Present!"
@@ -488,10 +514,29 @@ class SpectrumClient:
                     result["success"] = True  # Form was submitted
                     result["message"] = "Form submitted. Check the screenshot to verify."
 
-                browser.close()
+                await browser.close()
                 return result
 
         except Exception as e:
             logger.error(f"Playwright error during attendance submission: {e}")
             result["message"] = f"Error: {e}"
             return result
+
+    def submit_attendance_playwright(self, submit_url: str, password: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Synchronous wrapper around submit_attendance_async.
+        Handles running inside or outside an active asyncio event loop safely.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # Running on a thread that already owns an active event loop:
+            # Execute in an isolated thread with its own loop to prevent Playwright conflict
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(lambda: asyncio.run(self.submit_attendance_async(submit_url, password)))
+                return future.result()
+        else:
+            return asyncio.run(self.submit_attendance_async(submit_url, password))
