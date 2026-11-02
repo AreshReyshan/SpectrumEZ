@@ -82,6 +82,7 @@ class SpectrumTelegramBot:
         app.add_handler(CommandHandler("help", self.cmd_help))
         app.add_handler(CommandHandler("status", self.cmd_status))
         app.add_handler(CommandHandler("deadlines", self.cmd_deadlines))
+        app.add_handler(CommandHandler("calendar", self.cmd_calendar))
         app.add_handler(CommandHandler("announcements", self.cmd_announcements))
         app.add_handler(CommandHandler("attendance", self.cmd_attendance))
         app.add_handler(CommandHandler("check", self.cmd_check))
@@ -110,9 +111,9 @@ class SpectrumTelegramBot:
     def get_main_keyboard(self) -> ReplyKeyboardMarkup:
         """Provide a persistent quick-action keyboard on phone."""
         keyboard = [
-            ["📅 Deadlines", "📢 Announcements"],
-            ["🚨 Attendance", "🔄 Sync Spectrum"],
-            ["📊 Status", "ℹ️ Help"]
+            ["📅 Deadlines", "🗓️ Calendar"],
+            ["📢 Announcements", "🚨 Attendance"],
+            ["🔄 Sync Spectrum", "📊 Status"]
         ]
         return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -228,6 +229,33 @@ class SpectrumTelegramBot:
             logger.error(f"Error handling /deadlines: {e}")
             await safe_reply(msg, f"⚠️ Error fetching deadlines: {e}")
 
+    async def cmd_calendar(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /calendar command."""
+        await self.ensure_chat_id(update)
+        is_valid, _ = verify_session()
+        if not is_valid:
+            await safe_reply(
+                update.message,
+                "⚠️ *Not logged into Spectrum yet!*\n"
+                "Please run `setup_login.bat` on your computer to log in first.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        msg = await update.message.reply_text("🗓️ Loading this month's calendar and deadlines from Spectrum...")
+        try:
+            cal_data = await asyncio.to_thread(self.dead_mgr.get_calendar_data)
+            formatted = self.dead_mgr.format_calendar_telegram(cal_data)
+            if len(formatted) > 3800:
+                chunks = [formatted[i:i+3800] for i in range(0, len(formatted), 3800)]
+                for chunk in chunks:
+                    await safe_reply(update.message, chunk, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+            else:
+                await safe_reply(msg, formatted, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        except Exception as e:
+            logger.error(f"Error handling /calendar: {e}")
+            await safe_reply(msg, f"⚠️ Error loading calendar: {e}")
+
     async def cmd_announcements(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /announcements command."""
         await self.ensure_chat_id(update)
@@ -241,20 +269,28 @@ class SpectrumTelegramBot:
             )
             return
 
-        msg = await update.message.reply_text("📢 Loading recent course announcements...")
+        msg = await update.message.reply_text("📢 Loading recent course announcements with full details...")
         try:
-            recent = await asyncio.to_thread(self.ann_mgr.get_recent_summary, 2)
-            if not recent:
+            all_anns = await asyncio.to_thread(self.ann_mgr.get_all_announcements, 5, False)
+            if not all_anns:
                 await safe_reply(msg, "ℹ️ No announcements found or could not reach course forums.")
                 return
 
-            text_chunks = ["📢 *LATEST COURSE ANNOUNCEMENTS*\n━━━━━━━━━━━━━━━━━━"]
-            for ann in recent[:6]:
+            text_chunks = [f"📢 *LATEST COURSE ANNOUNCEMENTS* ({len(all_anns)} total)\n━━━━━━━━━━━━━━━━━━"]
+            for ann in all_anns[:5]:
+                body = ann.get("content", "").strip()
+                if body:
+                    body_snippet = body[:240] + ("..." if len(body) > 240 else "")
+                    body_formatted = f"\n💬 _{sanitize_text(body_snippet)}_\n"
+                else:
+                    body_formatted = "\n"
+
                 chunk = (
                     f"\n📚 *{sanitize_text(ann.get('course_name', 'Course'))}*\n"
                     f"📌 *{sanitize_text(ann.get('title', 'Notice'))}*\n"
-                    f"👤 {sanitize_text(ann.get('author', 'Lecturer'))} ({ann.get('date', '')})\n"
-                    f"🔗 [View Post]({ann.get('url', '')})\n"
+                    f"👤 {sanitize_text(ann.get('author', 'Lecturer'))} ({ann.get('date', 'Recent')})"
+                    f"{body_formatted}"
+                    f"🔗 [Read Full Post]({ann.get('url', '')})\n"
                 )
                 text_chunks.append(chunk)
 
@@ -386,7 +422,10 @@ class SpectrumTelegramBot:
         lower_text = text.lower()
 
         # Handle keyboard shortcuts
-        if "deadlines" in lower_text:
+        if "calendar" in lower_text:
+            await self.cmd_calendar(update, context)
+            return
+        elif "deadlines" in lower_text:
             await self.cmd_deadlines(update, context)
             return
         elif "announcements" in lower_text:
@@ -440,7 +479,7 @@ class SpectrumTelegramBot:
                 if result.get("screenshot"):
                     try:
                         with open(result["screenshot"], "rb") as photo:
-                            await query.message.reply_photo(photo=photo, caption="📸 Spectrum Attendance Proof")
+                            await update.message.reply_photo(photo=photo, caption="📸 Spectrum Attendance Proof")
                     except Exception as e:
                         logger.error(f"Error sending screenshot: {e}")
             else:

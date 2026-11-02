@@ -60,5 +60,27 @@ class TestSpectrumEzComponents(unittest.TestCase):
 
         asyncio.run(run_async_check())
 
+    def test_calendar_data_structure(self):
+        """Verify calendar month data structure and formatting."""
+        from deadlines import DeadlineManager
+        dead_mgr = DeadlineManager()
+        cal = dead_mgr.get_calendar_data(2026, 11)
+        self.assertEqual(cal.get("year"), 2026)
+        self.assertEqual(cal.get("month"), 11)
+        self.assertIn("events_by_day", cal)
+        self.assertIn("days_in_month", cal)
+        formatted = dead_mgr.format_calendar_telegram(cal)
+        self.assertIn("NOVEMBER 2026", formatted)
+
+    def test_announcements_cache(self):
+        """Verify cached announcements loading."""
+        from announcements import AnnouncementManager
+        ann_mgr = AnnouncementManager()
+        anns = ann_mgr.get_all_announcements(limit_per_course=2, force_refresh=False)
+        self.assertIsInstance(anns, list)
+        if anns:
+            self.assertIn("title", anns[0])
+            self.assertIn("content", anns[0])
+
 if __name__ == "__main__":
     unittest.main()

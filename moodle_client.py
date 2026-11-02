@@ -105,72 +105,134 @@ class SpectrumClient:
             logger.error(f"Error fetching enrolled courses: {e}")
             return []
 
-    def get_course_forum_announcements(self, course_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+    def get_course_forum_announcements(self, course_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         """
-        Fetch announcements from a course forum.
+        Fetch announcements from all forums within a course.
+        Crawls mod/forum/index.php?id=<course_id> and course page links.
         """
         self.refresh_session()
-        course_url = f"{self.base_url}/course/view.php?id={course_id}"
+        announcements = []
+        seen_discs = set()
+
         try:
-            resp = self.session.get(course_url, timeout=15)
-            soup = BeautifulSoup(resp.text, "html.parser")
+            forum_urls = []
+            
+            # 1. First check mod/forum/index.php which indexes all forums for the course
+            index_url = f"{self.base_url}/mod/forum/index.php?id={course_id}"
+            try:
+                resp = self.session.get(index_url, timeout=12)
+                if resp.status_code == 200 and "login.microsoftonline.com" not in resp.url:
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    for a in soup.find_all("a", href=re.compile(r"/mod/forum/view\.php\?id=\d+")):
+                        href = a["href"]
+                        if href not in forum_urls:
+                            forum_urls.append(href)
+            except Exception as ie:
+                logger.debug(f"Forum index lookup notice: {ie}")
 
-            # Look for forum link (Announcements / Pengumuman / News)
-            forum_links = []
-            for a in soup.find_all("a", href=re.compile(r"/mod/forum/view\.php\?id=\d+")):
-                forum_name = a.get_text(strip=True).lower()
-                href = a["href"]
-                if any(k in forum_name for k in ["announcement", "pengumuman", "news", "forum"]):
-                    forum_links.insert(0, href)
-                else:
-                    forum_links.append(href)
+            # 2. Also inspect the course main page
+            course_url = f"{self.base_url}/course/view.php?id={course_id}"
+            try:
+                c_resp = self.session.get(course_url, timeout=12)
+                if c_resp.status_code == 200 and "login.microsoftonline.com" not in c_resp.url:
+                    c_soup = BeautifulSoup(c_resp.text, "html.parser")
+                    for a in c_soup.find_all("a", href=re.compile(r"/mod/forum/view\.php\?id=\d+")):
+                        href = a["href"]
+                        if href not in forum_urls:
+                            forum_urls.append(href)
+                            
+                    # Check direct discussion links on the course page (from Latest announcements block)
+                    for a in c_soup.find_all("a", href=re.compile(r"/mod/forum/discuss\.php\?d=\d+")):
+                        href = a["href"]
+                        m = re.search(r"d=(\d+)", href)
+                        if m and m.group(1) not in seen_discs:
+                            d_id = m.group(1)
+                            title = a.get_text(strip=True)
+                            if title and len(title) > 2:
+                                seen_discs.add(d_id)
+                                announcements.append({
+                                    "id": d_id,
+                                    "title": title,
+                                    "author": "Course Lecturer",
+                                    "date": "Recent",
+                                    "url": f"{self.base_url}/mod/forum/discuss.php?d={d_id}",
+                                    "course_id": course_id,
+                                    "forum_name": "Announcements"
+                                })
+            except Exception as ce:
+                logger.debug(f"Course page forum crawl notice: {ce}")
 
-            if not forum_links:
-                return []
+            # 3. For each discovered forum, parse discussions
+            for f_url in forum_urls:
+                try:
+                    f_resp = self.session.get(f_url, timeout=12)
+                    if f_resp.status_code != 200:
+                        continue
+                    f_soup = BeautifulSoup(f_resp.text, "html.parser")
+                    
+                    heading = f_soup.find(["h1", "h2"])
+                    forum_name = heading.get_text(strip=True) if heading else "Announcements"
+                    if "forum" in forum_name.lower():
+                        forum_name = re.sub(r"(?i)forum", "", forum_name).strip() or "Announcements"
 
-            target_forum = forum_links[0]
-            forum_resp = self.session.get(target_forum, timeout=15)
-            f_soup = BeautifulSoup(forum_resp.text, "html.parser")
+                    rows = f_soup.find_all("tr", {"data-region": "discussion-list-item"})
+                    if not rows:
+                        rows = f_soup.find_all("tr")
 
-            announcements = []
-            # Find discussions in forum table
-            disc_links = f_soup.find_all("a", href=re.compile(r"/mod/forum/discuss\.php\?d=\d+"))
-            seen_discs = set()
+                    for row in rows:
+                        disc_link = row.find("a", href=re.compile(r"/mod/forum/discuss\.php\?d=\d+"))
+                        if not disc_link:
+                            continue
+                        href = disc_link["href"]
+                        m = re.search(r"d=(\d+)", href)
+                        if not m:
+                            continue
+                        d_id = m.group(1)
+                        if d_id in seen_discs:
+                            continue
 
-            for link in disc_links[:limit]:
-                href = link["href"]
-                d_match = re.search(r"d=(\d+)", href)
-                if not d_match:
-                    continue
-                d_id = d_match.group(1)
-                if d_id in seen_discs:
-                    continue
-                seen_discs.add(d_id)
+                        title = disc_link.get_text(strip=True)
+                        if not title:
+                            continue
 
-                title = link.get_text(strip=True)
-                if not title:
-                    continue
+                        author = "Lecturer"
+                        author_cell = row.find("td", class_="author") or row.find(class_=re.compile(r"author|userpicture"))
+                        if author_cell:
+                            author_name_elem = author_cell.find(class_=re.compile(r"text-truncate|line-height"))
+                            if author_name_elem:
+                                author = author_name_elem.get_text(strip=True)
+                            else:
+                                author = author_cell.get_text(" ", strip=True)
+                            author = re.sub(r"\s+", " ", author).strip()
 
-                # Find author and date from the discussion row
-                row = link.find_parent("tr")
-                author = "Lecturer"
-                date_str = ""
-                if row:
-                    author_elem = row.find(class_=re.compile(r"author|userpicture|author-info"))
-                    if author_elem:
-                        author = author_elem.get_text(strip=True)
-                    date_elem = row.find(class_=re.compile(r"lastpost|created|date"))
-                    if date_elem:
-                        date_str = date_elem.get_text(strip=True)
+                        date_str = ""
+                        time_tag = row.find("time")
+                        if time_tag:
+                            date_str = time_tag.get_text(strip=True)
+                        else:
+                            date_elem = row.find(class_=re.compile(r"lastpost|created|date"))
+                            if date_elem:
+                                date_str = date_elem.get_text(strip=True)
 
-                announcements.append({
-                    "id": d_id,
-                    "title": title,
-                    "author": author,
-                    "date": date_str,
-                    "url": f"{self.base_url}/mod/forum/discuss.php?d={d_id}",
-                    "course_id": course_id
-                })
+                        seen_discs.add(d_id)
+                        announcements.append({
+                            "id": d_id,
+                            "title": title,
+                            "author": author,
+                            "date": date_str,
+                            "url": f"{self.base_url}/mod/forum/discuss.php?d={d_id}",
+                            "course_id": course_id,
+                            "forum_name": forum_name
+                        })
+
+                        if len(announcements) >= limit:
+                            break
+
+                except Exception as fe:
+                    logger.debug(f"Error reading forum {f_url}: {fe}")
+
+                if len(announcements) >= limit:
+                    break
 
             return announcements
         except Exception as e:
@@ -178,19 +240,35 @@ class SpectrumClient:
             return []
 
     def get_announcement_details(self, discuss_url: str) -> Optional[Dict[str, str]]:
-        """Fetch the full content of an announcement post."""
+        """Fetch the clean content of an announcement post."""
         self.refresh_session()
         try:
             resp = self.session.get(discuss_url, timeout=15)
             soup = BeautifulSoup(resp.text, "html.parser")
-            post_content = soup.find(class_=re.compile(r"post-content|posting|forumpost"))
+            
+            post_content = soup.find(class_="post-content-container")
+            if not post_content:
+                post_content = soup.find("div", class_="text_to_html") or soup.find(class_=re.compile(r"post-content|forumpost"))
             if not post_content:
                 post_content = soup.find("div", class_="content")
             
-            text = post_content.get_text(strip=True) if post_content else ""
-            # Clean up excessive spacing
-            text = re.sub(r"\s+", " ", text)
-            return {"content": text[:800]}
+            if not post_content:
+                return {"content": ""}
+
+            paragraphs = []
+            for p in post_content.find_all(["p", "div", "li"]):
+                txt = p.get_text(strip=True)
+                if txt and txt not in paragraphs and not any(txt in existing for existing in paragraphs):
+                    paragraphs.append(txt)
+
+            if paragraphs:
+                clean_text = "\n\n".join(paragraphs)
+            else:
+                clean_text = post_content.get_text("\n", strip=True)
+
+            clean_text = re.sub(r"(?i)Permalink\s*Reply", "", clean_text)
+            clean_text = re.sub(r"\n{3,}", "\n\n", clean_text).strip()
+            return {"content": clean_text[:2500]}
         except Exception as e:
             logger.error(f"Error fetching announcement content: {e}")
             return None
@@ -218,26 +296,47 @@ class SpectrumClient:
                 title = title_elem.get_text(strip=True)
 
                 # Link to activity
-                link_elem = title_elem.find("a") or node.find("a", href=re.compile(r"/mod/(assign|quiz|workshop)/"))
+                link_elem = (
+                    node.find("a", class_="card-link") or 
+                    node.find("a", href=re.compile(r"/mod/(assign|quiz|attendance|workshop)/")) or
+                    title_elem.find("a")
+                )
                 link = link_elem["href"] if link_elem and link_elem.has_attr("href") else ""
 
                 # Course name
-                course_elem = node.find(class_=re.compile(r"course|event-course"))
-                course_name = course_elem.get_text(strip=True) if course_elem else "Course"
+                course_link = node.find("a", href=re.compile(r"/course/view\.php\?id="))
+                if course_link:
+                    course_name = course_link.get_text(strip=True)
+                else:
+                    course_elem = node.find(class_=re.compile(r"course|event-course"))
+                    course_name = course_elem.get_text(strip=True) if course_elem else ""
+
+                if not course_name or course_name == title:
+                    desc_text = node.get_text(" ", strip=True)
+                    for c_kw in ["WIA", "WIX", "WIB", "WIC", "LEAP"]:
+                        m = re.search(rf"\b({c_kw}\d{{4}}[A-Za-z0-9/\s-]*)", desc_text)
+                        if m:
+                            course_name = m.group(1).strip()
+                            break
+                    if not course_name:
+                        course_name = "UM Course"
 
                 # Date / time info
                 date_elem = node.find(class_=re.compile(r"date|event-time"))
                 date_str = date_elem.get_text(strip=True) if date_elem else ""
 
                 # Description
-                desc_elem = node.find(class_=re.compile(r"description|event-details"))
+                desc_elem = node.find(class_=re.compile(r"description|card-body"))
                 desc = desc_elem.get_text(strip=True) if desc_elem else ""
 
                 # Activity type
+                comp = node.get("data-event-component", "")
                 act_type = "assignment"
-                if "quiz" in link or "quiz" in title.lower():
+                if "quiz" in comp or "quiz" in link or "quiz" in title.lower():
                     act_type = "quiz"
-                elif "workshop" in link:
+                elif "attendance" in comp or "attendance" in link or "attendance" in title.lower():
+                    act_type = "attendance"
+                elif "workshop" in comp or "workshop" in link:
                     act_type = "workshop"
 
                 events.append({
@@ -289,6 +388,119 @@ class SpectrumClient:
         except Exception as e:
             logger.error(f"Error checking assignment status: {e}")
             return {"submitted": False, "status_text": "Could not check", "time_remaining": ""}
+
+    def get_calendar_month_data(self, year: Optional[int] = None, month: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Fetch Moodle detailed month calendar view and return structured day events.
+        """
+        import datetime
+        import calendar
+        self.refresh_session()
+        
+        now = datetime.datetime.now()
+        target_year = year or now.year
+        target_month = month or now.month
+        
+        start_weekday, num_days = calendar.monthrange(target_year, target_month)
+        month_name = calendar.month_name[target_month]
+
+        month_data = {
+            "year": target_year,
+            "month": target_month,
+            "month_name": month_name,
+            "days_in_month": num_days,
+            "start_weekday": start_weekday,  # 0 = Monday, 6 = Sunday
+            "today": now.day if (now.year == target_year and now.month == target_month) else None,
+            "events_by_day": {},
+            "total_events": 0
+        }
+
+        try:
+            target_dt = datetime.datetime(target_year, target_month, 1)
+            ts = int(target_dt.timestamp())
+            cal_url = f"{self.base_url}/calendar/view.php?view=month&time={ts}"
+
+            resp = self.session.get(cal_url, timeout=15)
+            if "login.microsoftonline.com" in resp.url:
+                logger.error("Session expired while fetching calendar month view.")
+                return month_data
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            cal_table = soup.find("table", class_=re.compile(r"calendarmonth|maincalendar"))
+            if not cal_table:
+                return month_data
+
+            total = 0
+            for td in cal_table.find_all("td", class_=re.compile(r"\bday\b")):
+                day_str = td.get("data-day")
+                if not day_str:
+                    continue
+                day_num = int(day_str)
+                
+                day_events = []
+                for li in td.find_all("li", {"data-region": "event-item"}):
+                    a = li.find("a", {"data-action": "view-event"})
+                    if not a:
+                        continue
+                    
+                    title = a.get("title") or a.get_text(strip=True)
+                    href = a.get("href", "")
+                    comp = li.get("data-event-component", "")
+                    ev_type = li.get("data-event-eventtype", "")
+
+                    is_assign = "assign" in comp or "submission" in title.lower() or "due" in ev_type.lower()
+                    is_quiz = "quiz" in comp or "quiz" in title.lower() or "exam" in title.lower() or "test" in title.lower()
+                    is_att = "attendance" in comp or "attendance" in title.lower()
+
+                    category = "assignment" if is_assign else ("quiz" if is_quiz else ("attendance" if is_att else "event"))
+
+                    # Course label extraction if embedded
+                    course_name = ""
+                    for c_kw in ["WIA", "WIX", "WIB", "WIC", "LEAP"]:
+                        m = re.search(rf"\b({c_kw}\d{{4}}[A-Za-z0-9/\s-]*)", title)
+                        if m:
+                            course_name = m.group(1).strip()
+                            break
+
+                    if not course_name:
+                        t_lower = title.lower()
+                        if any(k in t_lower for k in ["chiew", "nasuha", "mobile application"]):
+                            course_name = "WIA2007 Mobile App Dev"
+                        elif any(k in t_lower for k in ["fatimi", "thinking and communication"]):
+                            course_name = "WIX2001 Thinking & Comm"
+                        elif any(k in t_lower for k in ["hafizah", "liana", "software project", "project management"]):
+                            course_name = "WIX2002 Project Mgmt"
+                        elif any(k in t_lower for k in ["vimala", "nandy", "probability", "statistics"]):
+                            course_name = "WIA2003 Probability & Stat"
+                        elif any(k in t_lower for k in ["database", "self-paced tutorial"]):
+                            course_name = "WIA2001 Database"
+                        elif "leap" in t_lower:
+                            course_name = "LEAP Initiative"
+                        elif "turnitin" in t_lower:
+                            course_name = "Turnitin"
+                        else:
+                            course_name = "UM Course"
+
+                    day_events.append({
+                        "id": a.get("data-event-id", ""),
+                        "day": day_num,
+                        "title": title,
+                        "url": href,
+                        "category": category,
+                        "component": comp,
+                        "course": course_name,
+                        "submitted": False
+                    })
+                    total += 1
+
+                if day_events:
+                    month_data["events_by_day"][str(day_num)] = day_events
+
+            month_data["total_events"] = total
+            return month_data
+        except Exception as e:
+            logger.error(f"Error fetching calendar month data: {e}")
+            return month_data
 
     def get_course_attendance_activities(self, course_id: str) -> List[Dict[str, Any]]:
         """

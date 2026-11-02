@@ -37,6 +37,8 @@ PENDING_ATTENDANCE_FILE = DATA_DIR / "pending_attendance.json"
 SEEN_ANNOUNCEMENTS_FILE = DATA_DIR / "seen_announcements.json"
 SAVED_COURSES_FILE = DATA_DIR / "courses.json"
 ATTENDANCE_HISTORY_FILE = DATA_DIR / "attendance_history.json"
+ANNOUNCEMENTS_CACHE_FILE = DATA_DIR / "announcements_cache.json"
+CALENDAR_CACHE_FILE = DATA_DIR / "calendar_cache.json"
 SCREENSHOTS_DIR = DATA_DIR / "screenshots"
 SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 

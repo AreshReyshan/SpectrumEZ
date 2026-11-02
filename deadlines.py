@@ -1,7 +1,10 @@
+import json
 import logging
 import re
+import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
+from config import CALENDAR_CACHE_FILE
 from moodle_client import SpectrumClient
 
 logger = logging.getLogger("deadlines")
@@ -110,6 +113,72 @@ class DeadlineManager:
                 )
 
         lines.append("\n💡 _Tip: Check submission links regularly to verify final turn-in._")
+        return "\n".join(lines)
+
+    def get_calendar_data(self, year: Optional[int] = None, month: Optional[int] = None, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Fetch calendar month events with caching.
+        """
+        now = datetime.now()
+        target_year = year or now.year
+        target_month = month or now.month
+
+        # Check cache if not forcing refresh
+        if not force_refresh and CALENDAR_CACHE_FILE.exists():
+            try:
+                mtime = CALENDAR_CACHE_FILE.stat().st_mtime
+                if time.time() - mtime < 600:  # 10 min TTL
+                    with open(CALENDAR_CACHE_FILE, "r", encoding="utf-8") as f:
+                        cached = json.load(f)
+                        if cached and cached.get("year") == target_year and cached.get("month") == target_month:
+                            return cached
+            except Exception as e:
+                logger.warning(f"Could not read calendar cache: {e}")
+
+        data = self.client.get_calendar_month_data(target_year, target_month)
+        
+        # Save to disk cache
+        try:
+            with open(CALENDAR_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving calendar cache: {e}")
+
+        return data
+
+    def format_calendar_telegram(self, month_data: Dict[str, Any]) -> str:
+        """
+        Format monthly schedule into an organized Telegram agenda view.
+        """
+        events_by_day = month_data.get("events_by_day", {})
+        month_name = month_data.get("month_name", "Month")
+        year = month_data.get("year", datetime.now().year)
+        total = month_data.get("total_events", 0)
+
+        if not events_by_day:
+            return f"📅 *SPECTRUM CALENDAR — {month_name.upper()} {year}*\n━━━━━━━━━━━━━━━━━━━━━━\n🎉 No deadlines or events scheduled for this month!"
+
+        lines = [
+            f"📅 *SPECTRUM SCHEDULE — {month_name.upper()} {year}*",
+            f"━━━━━━━━━━━━━━━━━━━━━━",
+            f"📊 Total items scheduled: {total}\n"
+        ]
+
+        # Filter and summarize days with events
+        sorted_days = sorted(events_by_day.keys(), key=lambda d: int(d))
+        for day_str in sorted_days:
+            day_events = events_by_day[day_str]
+            lines.append(f"🗓️ *Day {day_str} {month_name}:*")
+            for ev in day_events:
+                cat = ev.get("category", "event")
+                icon = "📝 [Due]" if cat == "assignment" else ("❓ [Quiz]" if cat == "quiz" else "⏱️ [Class]")
+                course = f" (`{ev.get('course')}`)" if ev.get("course") else ""
+                url = ev.get("url", "")
+                link_text = f" — [View]({url})" if url else ""
+                lines.append(f"• {icon} *{ev.get('title')}*{course}{link_text}")
+            lines.append("")
+
+        lines.append("💡 _View the web dashboard for interactive monthly calendar grid._")
         return "\n".join(lines)
 
     def check_urgent_reminders(self) -> List[Dict[str, Any]]:
